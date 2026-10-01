@@ -790,37 +790,86 @@ body.mobile-build .result-actions button{min-height:50px}
   };
 
   let audioCtx = null;
+  let sfxMaster = null;
+  let sfxCompressor = null;
   let music = null;
 
   document.addEventListener('contextmenu', e => {
     if (document.body.classList.contains('is-playing') && e.target.closest && e.target.closest('#gameBoard')) e.preventDefault();
   });
 
-
   function ensureAudioCtx() {
     if (!state.sound) return null;
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) return null;
-      if (!audioCtx) audioCtx = new Ctx();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (!audioCtx) {
+        try { audioCtx = new Ctx({ latencyHint:'interactive' }); }
+        catch (_) { audioCtx = new Ctx(); }
+        sfxMaster = audioCtx.createGain();
+        sfxMaster.gain.value = 2.6;
+        if (audioCtx.createDynamicsCompressor) {
+          sfxCompressor = audioCtx.createDynamicsCompressor();
+          sfxCompressor.threshold.value = -20;
+          sfxCompressor.knee.value = 12;
+          sfxCompressor.ratio.value = 5;
+          sfxCompressor.attack.value = 0.002;
+          sfxCompressor.release.value = 0.12;
+          sfxMaster.connect(sfxCompressor);
+          sfxCompressor.connect(audioCtx.destination);
+        } else {
+          sfxMaster.connect(audioCtx.destination);
+        }
+      }
+      if (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted') {
+        audioCtx.resume().catch(()=>{});
+      }
       return audioCtx;
     } catch (_) { return null; }
   }
 
-  function tone(freq, duration, volume, type='sine', delay=0) {
-    // Mobile: stronger interaction SFX. BGM volume is unchanged; hit/miss feedback is intentionally forward.
+  function unlockSfxAudio() {
     const ctx = ensureAudioCtx();
     if (!ctx) return;
+    const finish = () => {
+      try {
+        const buffer = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(sfxMaster || ctx.destination);
+        src.start(0);
+      } catch (_) {}
+    };
+    if (ctx.state === 'running') finish();
+    else ctx.resume().then(finish).catch(()=>{});
+  }
+
+  document.addEventListener('pointerdown', unlockSfxAudio, { capture:true, passive:true });
+  document.addEventListener('touchstart', unlockSfxAudio, { capture:true, passive:true });
+
+  function tone(freq, duration, volume, type='sine', delay=0) {
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
+    if (ctx.state !== 'running') {
+      ctx.resume().then(() => {
+        if (ctx.state === 'running') tone(freq, duration, volume, type, delay);
+      }).catch(()=>{});
+      return;
+    }
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
+    const out = sfxMaster || ctx.destination;
+    const when = ctx.currentTime + Math.max(0.002, delay);
+    const level = Math.max(.0001, Math.min(.72, volume * state.sfxVolume * 6.5));
     osc.type = type;
-    osc.frequency.setValueAtTime(freq, ctx.currentTime + delay);
-    gain.gain.setValueAtTime(Math.max(.0001, Math.min(.30, volume * state.sfxVolume * 2.4)), ctx.currentTime + delay);
-    gain.gain.exponentialRampToValueAtTime(.0001, ctx.currentTime + delay + duration);
-    osc.connect(gain); gain.connect(ctx.destination);
-    osc.start(ctx.currentTime + delay);
-    osc.stop(ctx.currentTime + delay + duration);
+    osc.frequency.setValueAtTime(freq, when);
+    gain.gain.setValueAtTime(.0001, when);
+    gain.gain.exponentialRampToValueAtTime(level, when + .004);
+    gain.gain.exponentialRampToValueAtTime(.0001, when + Math.max(.065, duration));
+    osc.connect(gain);
+    gain.connect(out);
+    osc.start(when);
+    osc.stop(when + Math.max(.075, duration + .02));
   }
 
   function hitSound(judgement) {
@@ -2078,7 +2127,7 @@ body.mobile-build .result-actions button{min-height:50px}
     const savedBgm=Number(localStorage.getItem('click5-v9-bgm-volume'));
     const savedSfx=Number(localStorage.getItem('click5-v9-sfx-volume'));
     if(Number.isFinite(savedBgm) && savedBgm>=0 && savedBgm<=1) state.bgmVolume=savedBgm;
-    if(Number.isFinite(savedSfx) && savedSfx>=0 && savedSfx<=1) state.sfxVolume=savedSfx;
+    state.sfxVolume=(Number.isFinite(savedSfx) && savedSfx>0.05) ? Math.max(.75,savedSfx) : 1.00;
   } catch (_) {}
   syncVolumeUi();
 
